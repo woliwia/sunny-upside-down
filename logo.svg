@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 140" width="120" height="140">
+  <!-- Sunny Upside Down: an egg whose yolk is the sun, with a walking path across it -->
+  <defs>
+    <linearGradient id="eggShine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f3ede2"/>
+    </linearGradient>
+    <radialGradient id="yolk" cx="0.4" cy="0.35" r="0.9">
+      <stop offset="0" stop-color="#ffd94d"/>
+      <stop offset="0.65" stop-color="#ffb320"/>
+      <stop offset="1" stop-color="#f59300"/>
+    </radialGradient>
+  </defs>
+  <!-- egg white (map background) -->
+  <path d="M60 6 C 88 6 112 44 112 84 C 112 116 89 134 60 134 C 31 134 8 116 8 84 C 8 44 32 6 60 6 Z"
+        fill="url(#eggShine)" stroke="#e0d6c4" stroke-width="3"/>
+  <!-- sun rays around the yolk -->
+  <g stroke="#ffb320" stroke-width="4" stroke-linecap="round">
+    <line x1="60" y1="34" x2="60" y2="24"/>
+    <line x1="60" y1="106" x2="60" y2="116"/>
+    <line x1="24" y1="70" x2="14" y2="70"/>
+    <line x1="96" y1="70" x2="106" y2="70"/>
+    <line x1="35" y1="45" x2="28" y2="38"/>
+    <line x1="85" y1="45" x2="92" y2="38"/>
+    <line x1="35" y1="95" x2="28" y2="102"/>
+    <line x1="85" y1="95" x2="92" y2="102"/>
+  </g>
+  <!-- yolk = the sun -->
+  <circle cx="60" cy="70" r="30" fill="url(#yolk)" stroke="#e88a00" stroke-width="2"/>
+  <!-- walking route across the egg, like a map -->
+  <path d="M 26 112 Q 44 92 56 78 T 84 40" fill="none" stroke="#2b6cb0"
+        stroke-width="4.5" stroke-linecap="round" stroke-dasharray="1 9"/>
+  <!-- start dot -->
+  <circle cx="26" cy="112" r="5" fill="#2b6cb0" stroke="#fff" stroke-width="2"/>
+  <!-- destination pin -->
+  <g transform="translate(84,40)">
+    <path d="M0 2 C -7 -8 -7 -16 0 -16 C 7 -16 7 -8 0 2 Z" fill="#e53e3e" stroke="#fff" stroke-width="1.5"/>
+    <circle cx="0" cy="-10" r="2.6" fill="#fff"/>
+  </g>
+</svg>
