@@ -403,6 +403,87 @@ async function overpassFetch(query, label){
   throw new Error("all free OpenStreetMap servers are busy — wait a minute and try again ("+(lastErr && lastErr.message||lastErr)+")");
 }
 
+// ---------- terrain: real ground elevation, so hills cast shadows too ----------
+// Source: AWS Open Data "terrarium" tiles (Mapzen/Tilezen, SRTM-family, free, no key,
+// open CORS) — the same base elevation data ShadeMap's own free tier is built on. See
+// README § "Shadow accuracy — real data behind the guesses" for accuracy notes: ~30m
+// native resolution, so a steep summit can read tens of metres low, but the day-to-day
+// case — is street X inside hill Y's shadow — comes out right, which is what matters here.
+const TERRAIN_ZOOM = 14;                 // ~13-19m/pixel at Budapest's latitude
+const MAX_TERRAIN_RAY = 2500;            // metres — hills are a much longer-range occluder than walls
+const TERRAIN_STEP = 60;                 // metres per march step (terrain is smooth; no need for CELL-grade density)
+const terrainTiles = new Map();          // "z/x/y" -> Float32Array(256*256) of metres
+let terrainIdbP = null;
+function terrainIdb(){
+  if(!terrainIdbP) terrainIdbP = new Promise((res,rej)=>{
+    const r = indexedDB.open("sud-terrain-v1", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("tiles");
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  return terrainIdbP;
+}
+function lonToTileX(lon, z){ return Math.floor((lon+180)/360 * (1<<z)); }
+function latToTileY(lat, z){
+  const rad = lat*RAD;
+  return Math.floor((1 - Math.asinh(Math.tan(rad))/Math.PI) / 2 * (1<<z));
+}
+function tileToLon(x, z){ return x/(1<<z)*360 - 180; }
+function tileToLat(y, z){ const n=Math.PI - 2*Math.PI*y/(1<<z); return (180/Math.PI)*Math.atan(0.5*(Math.exp(n)-Math.exp(-n))); }
+
+async function fetchTerrainTile(z,x,y){
+  const key = `${z}/${x}/${y}`;
+  if(terrainTiles.has(key)) return;
+  try{
+    const db = await terrainIdb();
+    const cached = await new Promise(r=>{ const rq=db.transaction("tiles").objectStore("tiles").get(key); rq.onsuccess=()=>r(rq.result); rq.onerror=()=>r(null); });
+    if(cached){ terrainTiles.set(key, cached); return; }
+  }catch(e){ /* cache is best-effort */ }
+  const url = `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
+  const res = await fetch(url);
+  if(!res.ok){ terrainTiles.set(key, null); return; }   // ocean/out-of-coverage tiles 404; treat as "no data"
+  const bitmap = await createImageBitmap(await res.blob());
+  const cnv = document.createElement("canvas"); cnv.width=256; cnv.height=256;
+  const ctx = cnv.getContext("2d"); ctx.drawImage(bitmap,0,0);
+  const px = ctx.getImageData(0,0,256,256).data;
+  const grid = new Float32Array(256*256);
+  for(let i=0;i<grid.length;i++) grid[i] = (px[i*4]*256 + px[i*4+1] + px[i*4+2]/256) - 32768;
+  terrainTiles.set(key, grid);
+  try{ const db=await terrainIdb(); const tx=db.transaction("tiles","readwrite"); tx.objectStore("tiles").put(grid,key); }catch(e){}
+}
+async function ensureTerrainArea(bb){   // bb=[s,w,n,e], degrees
+  const pad = MAX_TERRAIN_RAY/110540;   // hills outside bb can still shade points inside it
+  const s=bb[0]-pad, w=bb[1]-pad, n=bb[2]+pad, e=bb[3]+pad;
+  const x0=lonToTileX(w,TERRAIN_ZOOM), x1=lonToTileX(e,TERRAIN_ZOOM);
+  const y0=latToTileY(n,TERRAIN_ZOOM), y1=latToTileY(s,TERRAIN_ZOOM);
+  const jobs=[];
+  for(let x=x0;x<=x1;x++) for(let y=y0;y<=y1;y++) jobs.push(fetchTerrainTile(TERRAIN_ZOOM,x,y));
+  await Promise.all(jobs);
+}
+function elevationAt(lat,lon){
+  const x=lonToTileX(lon,TERRAIN_ZOOM), y=latToTileY(lat,TERRAIN_ZOOM);
+  const grid = terrainTiles.get(`${TERRAIN_ZOOM}/${x}/${y}`);
+  if(!grid) return 0;
+  const n=1<<TERRAIN_ZOOM;
+  const px = Math.min(255, Math.max(0, Math.floor(((lon+180)/360*n - x)*256)));
+  const latRad=lat*RAD;
+  const py = Math.min(255, Math.max(0, Math.floor(((1-Math.asinh(Math.tan(latRad))/Math.PI)/2*n - y)*256)));
+  return grid[py*256+px];
+}
+// Marches from (lat,lon) toward the sun; true if any intervening ground point's implied
+// horizon angle exceeds the sun's elevation — the same tangent test as building walls,
+// just against a continuous terrain profile instead of a discrete height.
+function isTerrainShaded(lat,lon,sun){
+  const originEl = elevationAt(lat,lon);
+  const dLatPerM = 1/110540, dLonPerM = 1/(111320*Math.cos(lat*RAD));
+  for(let d=TERRAIN_STEP; d<=MAX_TERRAIN_RAY; d+=TERRAIN_STEP){
+    const plat = lat + sun.diry*d*dLatPerM;
+    const plon = lon + sun.dirx*d*dLonPerM;
+    const el = elevationAt(plat,plon);
+    if((el-originEl) >= d*sun.tanAlt) return true;
+  }
+  return false;
+}
+
 // ---------- tile store: the city, downloaded once, kept on your device ----------
 const tileMem = new Map();   // key -> {ts, ways:[], buildings:[], trees:[]}
 let idbP=null;
@@ -598,6 +679,7 @@ function collect(bb){
 // ---------- geometry ----------
 let lat0=BUDAPEST.lat, lon0=BUDAPEST.lon, cosLat=Math.cos(BUDAPEST.lat*RAD);
 function toXY(lat,lon){ return [ (lon-lon0)*111320*cosLat, (lat-lat0)*110540 ]; }
+function toLL(x,y){ return [ lat0 + y/110540, lon0 + x/(111320*cosLat) ]; }
 
 // ---------- routing world (graph + ray-casting grids), built from tiles ----------
 const world = {
@@ -738,11 +820,15 @@ async function computeShades(date){
     for(let i=0;i<E.length;i++){
       const e=E[i];
       const n=Math.max(2, Math.ceil(e.len/SAMPLE_STEP));
-      let shaded=0;
       const ax=X[e.a], ay=Y[e.a], bx=X[e.b], by=Y[e.b];
+      // Terrain is smooth over tens of metres, unlike walls/canopy — one horizon check per
+      // edge (at its midpoint) instead of per 8m sample keeps the hill check cheap.
+      const [mLat,mLon]=toLL((ax+bx)/2,(ay+by)/2);
+      const hillShaded = isTerrainShaded(mLat,mLon,sun);
+      let shaded=0;
       for(let k=0;k<n;k++){
         const t=(k+0.5)/n;
-        if(isShaded(ax+(bx-ax)*t, ay+(by-ay)*t, sun)) shaded++;
+        if(hillShaded || isShaded(ax+(bx-ax)*t, ay+(by-ay)*t, sun)) shaded++;
       }
       e.shade=shaded/n;
       if((i&8191)===8191) await breathe();
@@ -831,7 +917,7 @@ async function route(){
     if(bb[4] > MAX_CROW_KM*1000){
       setStatus(`That's ${(bb[4]/1000).toFixed(1)} km as the crow flies — long walk, big download. Hang on…`);
     }
-    await ensureArea(bb, "Downloading streets & buildings");
+    await Promise.all([ensureArea(bb, "Downloading streets & buildings"), ensureTerrainArea(bb.slice(0,4))]);
     if(!world.graphBbox || !bboxContainsBox(world.graphBbox, bb.slice(0,4))){
       setStatus("Building the walking graph…"); await breathe();
       buildGraph(bb.slice(0,4));
@@ -1021,9 +1107,9 @@ async function refreshShadowArea(){
   const padLat=250/110540, padLon=250/(111320*Math.cos(b.getCenter().lat*RAD));
   const vb=[b.getSouth()-padLat, b.getWest()-padLon, b.getNorth()+padLat, b.getEast()+padLon];
   try{
-    const fetched = await ensureArea(vb, "Loading buildings for shadows");
+    await Promise.all([ensureArea(vb, "Loading buildings for shadows"), ensureTerrainArea(vb)]);
     if(seq!==shadowSeq) return;      // superseded by a newer pan
-    if(fetched){ setStatus(""); redrawShadows(); }
+    setStatus(""); redrawShadows();
   }catch(e){
     if(seq===shadowSeq) setStatus("Shadows: "+e.message, true);
   }
@@ -1095,6 +1181,18 @@ function redrawShadows(){
     }
     pushRing(ring);
   });
+  // Hills (Gellérthegy, Várhegy…): a coarse grid over the viewport, each cell asking "is this
+  // point behind the local horizon from the sun?" — terrain shade is a smooth field, not a
+  // discrete object, so it's sampled rather than extruded like buildings/canopy above.
+  const gLat=TERRAIN_STEP/110540, gLon=TERRAIN_STEP/(111320*cosL);
+  for(let plat=vb[0]; plat<=vb[2]; plat+=gLat){
+    for(let plon=vb[1]; plon<=vb[3]; plon+=gLon){
+      if(!isTerrainShaded(plat,plon,sun)) continue;
+      pushRing([
+        [plat,plon],[plat+gLat,plon],[plat+gLat,plon+gLon],[plat,plon+gLon]
+      ]);
+    }
+  }
   if(rings.length){
     L.polygon(rings,{stroke:false,fillColor:"#3b4256",fillOpacity:0.30,fillRule:"nonzero",interactive:false,renderer:shadowRenderer}).addTo(shadowLayer);
   }

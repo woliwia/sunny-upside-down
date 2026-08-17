@@ -103,7 +103,7 @@ taken. It cannot tell you where the shade will be at 17:30 tomorrow. So the app 
 | Address search | [Nominatim](https://nominatim.org) | ODbL |
 | Sun position | computed in-browser (SunCalc algorithm) | MIT |
 | Cloud forecast | [Open-Meteo](https://open-meteo.com) | free, keyless |
-| Terrain elevation *(optional engine)* | [AWS Open Data terrain tiles](https://registry.opendata.aws/terrain-tiles/) | public domain |
+| Real terrain elevation (Gellérthegy, Várhegy…) | [AWS Open Data terrain tiles](https://registry.opendata.aws/terrain-tiles/) (Mapzen/Tilezen, SRTM-family) | public domain |
 
 ## 📐 Shadow accuracy — real data behind the guesses
 
@@ -129,22 +129,52 @@ aerial LiDAR) cropped to Budapest and packed one byte per ~19×28 m cell (0 = no
 metres). It feeds the exact same shadow ray-caster as buildings and OSM trees, so a walk
 through a park now shows real dappled shade instead of a blank, "fully sunny" park.
 
-See [Contributing](#-contributing) if you spot a building or a patch of green that's still
-visibly wrong — the most likely explanation is that specific spot has no coverage in either
-dataset yet.
+**Terrain** was the remaining gap: a flat-ground assumption is fine in Pest but wrong near
+Gellérthegy or Várhegy, where the hill itself — not any building — is what blocks the sun.
+Fixed the same way as the other two, with real data instead of a paid API:
+
+- **Sun position** needs no dataset at all — it's closed-form astronomy (the SunCalc
+  algorithm), identical everywhere, accurate to a fraction of a degree.
+- **Ground elevation** comes live from AWS's public `elevation-tiles-prod` bucket
+  (Mapzen/Tilezen's "terrarium" tiles, SRTM-family data) — the same free base elevation
+  source services like ShadeMap build on, fetched directly in the browser with open CORS,
+  no key, no server-side step.
+- **The shadow test**: from every street point, march toward the sun in ~60 m steps for up
+  to 2.5 km, and compare each step's implied horizon angle — `atan2(elevation gain, distance)`
+  — against the sun's own elevation angle. If the ground rises faster than the sun does at
+  any point along that line, the hill is in the way. It's the exact same tangent-line test
+  already used for building walls and tree canopies, just walked across a continuous terrain
+  profile instead of a list of discrete objects — one combined shadow model for buildings,
+  vegetation, *and* hills.
+
+Honest accuracy note: free elevation data is derived from ~30 m satellite radar (SRTM), so a
+sharp summit can read tens of metres low — Gellérthegy's actual 235 m peak comes back around
+195 m from this source. That's a known characteristic of *any* free terrain dataset, including
+what a paid shadow API's free tier would use. It doesn't change the shape of the hill or which
+streets fall in its shadow at a given time of day — which is what a walking-route app actually
+needs — only the exact metres-above-sea-level number, which this app never shows you anyway.
+
+See [Contributing](#-contributing) if you spot a building, a patch of green, or a hillside
+that's still visibly wrong — the most likely explanation is that specific spot has no coverage
+in one of these datasets yet.
 
 ## 🌓 Two shadow engines
 
-| | Built-in (default) | ShadeMap engine (optional) |
+| | Built-in (default) | ShadeMap engine (optional, dev-only) |
 |---|---|---|
-| API key | none | free key from [shademap.app/about](https://shademap.app/about) |
-| Buildings & trees | ✅ | ✅ |
-| **Terrain** (Gellérthegy, Várhegy, the Buda hills) | ❌ flat ground | ✅ |
-| Rendering | Canvas polygons | GPU |
+| API key | none | required — and its **free tier is `localhost` only**; a real deployment needs a paid plan |
+| Buildings, trees, canopy | ✅ | ✅ (fed the exact same data via this app's own fetch code) |
+| Terrain (Gellérthegy, Várhegy…) | ✅ | ✅ |
+| Rendering | CPU ray-casting, Canvas | GPU |
+| Can this open-source app ship it to real users? | **Yes — free forever** | No — would require every visitor's usage to be covered by a paid plan |
 
-The optional engine is [`leaflet-shadow-simulator`](https://github.com/ted-piotrowski/leaflet-shadow-simulator)
-— the open-source engine behind **shademap.app**, by Ted Piotrowski. Add the key via the
-⚙️ button in the app or via `.env` (below) and the app switches to it automatically.
+Because a free, publicly-deployable open-source project can't depend on a key that only works
+on `localhost`, **the built-in engine is the one this app actually ships and relies on** — see
+above for exactly what real data it's built from. The optional
+[`leaflet-shadow-simulator`](https://github.com/ted-piotrowski/leaflet-shadow-simulator) engine
+(the open-source SDK behind **shademap.app**, by Ted Piotrowski) is kept in as an opt-in,
+localhost-only second opinion: add a free key via the ⚙️ button or `.env` and compare its GPU
+render against the built-in one, if you want to sanity-check the maths yourself.
 
 Routing sun-scores are always computed by the built-in ray-caster, in both cases.
 
@@ -247,8 +277,10 @@ Being honest about accuracy matters more than looking clever:
 - **Vegetation.** Individually-mapped OSM trees plus a real satellite canopy-height layer
   (see above) — but the canopy map is from 2009–2020 imagery, so a tree planted last year, or
   one felled last year, won't be reflected yet.
-- **Terrain.** The built-in engine treats the ground as flat — fine in Pest, less so around the
-  Buda hills. Use the optional ShadeMap engine for terrain shadows.
+- **Terrain.** Real elevation now feeds the built-in engine too (see above), but the free
+  source is ~30 m-resolution satellite radar — steep summits can read tens of metres low,
+  and a single sharp cliff or outcrop narrower than that can be missed. The shape of a hill
+  and which streets fall in its shadow come out right; exact peak elevation doesn't.
 - **Clouds** are shown as information only; an overcast sky has no hard shadows anyway.
 - **Free servers.** Overpass mirrors are donated infrastructure and get busy at peak hours; a
   fresh area can take a minute. It is a one-time cost per area thanks to the cache.
