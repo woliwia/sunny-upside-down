@@ -44,6 +44,18 @@
   /* time slider */
   .timebox{border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px 10px}
   #timeLabel{font-weight:700;font-size:15px;min-width:52px;text-align:center}
+  .slider-wrap{position:relative;flex:1;height:24px;display:flex;align-items:center}
+  .slider-track{
+    position:absolute;left:9px;right:9px;height:8px;border-radius:4px;top:50%;
+    transform:translateY(-50%);pointer-events:none;background:#2d3348;
+  }
+  .slider-marks{position:absolute;left:9px;right:9px;top:-3px;bottom:0;pointer-events:none}
+  .slider-marks .mark{position:absolute;top:0;font-size:12px;line-height:1;transform:translateX(-50%)}
+  #timeSlider{position:relative;z-index:2;width:100%;margin:0;background:transparent}
+  #timeSlider::-webkit-slider-runnable-track{background:transparent}
+  #timeSlider::-moz-range-track{background:transparent}
+  .tick-row{display:flex;justify-content:space-between;font-size:9.5px;color:#a89d80;padding:0 9px;margin-top:2px}
+  .sun-times{font-size:12px;color:#6b6353;margin-top:5px}
   input[type=range]{flex:1;accent-color:var(--sun);height:24px}
   .chk{display:flex;gap:7px;align-items:center;font-size:13px;cursor:pointer;
        border:1px solid var(--line);border-radius:8px;background:#fff;padding:8px 10px}
@@ -100,8 +112,14 @@
       <label class="lbl">Time of day — drag to watch shadows move 🕐</label>
       <div class="row">
         <span id="timeLabel">12:00</span>
-        <input type="range" id="timeSlider" min="0" max="1430" step="10" value="720">
+        <div class="slider-wrap">
+          <div class="slider-track" id="sliderTrack"></div>
+          <div class="slider-marks" id="sliderMarks"></div>
+          <input type="range" id="timeSlider" min="0" max="1430" step="10" value="720">
+        </div>
       </div>
+      <div class="tick-row"><span>0</span><span>3</span><span>6</span><span>9</span><span>12</span><span>15</span><span>18</span><span>21</span><span>24</span></div>
+      <div id="sunTimesLabel" class="sun-times">🌅 …… · 🌇 ……</div>
       <div class="row" style="margin-top:6px">
         <input type="date" id="dateInput">
         <button id="nowBtn">Now</button>
@@ -233,6 +251,30 @@ function sunPosition(date, lat, lon){
   return {altitude:alt, compass, dirx:Math.sin(compass), diry:Math.cos(compass), tanAlt:Math.tan(alt)};
 }
 
+// Sunrise/sunset for a given day: no separate formula, no fetch — just scan the same
+// sunPosition() the rest of the app already trusts for "is the sun up", and refine the two
+// crossings with bisection. Self-consistent by construction and cheap (a few hundred
+// evaluations of plain trig, once per date change).
+function sunTimes(date, lat, lon){
+  const day = new Date(date); day.setHours(0,0,0,0);
+  const altAt = (mins)=>{ const d=new Date(day); d.setMinutes(mins); return sunPosition(d,lat,lon).altitude; };
+  const refine = (loMin,hiMin,loAlt,hiAlt)=>{
+    for(let i=0;i<24;i++){                    // 1440min / 2^24 ≈ sub-millisecond precision
+      const midMin=(loMin+hiMin)/2, midAlt=altAt(midMin);
+      if((midAlt>0)===(loAlt>0)){ loMin=midMin; loAlt=midAlt; } else { hiMin=midMin; hiAlt=midAlt; }
+    }
+    const d=new Date(day); d.setMinutes((loMin+hiMin)/2); return d;
+  };
+  let prevAlt=altAt(0), sunrise=null, sunset=null;
+  for(let m=2; m<=1440; m+=2){
+    const alt=altAt(m);
+    if(prevAlt<=0 && alt>0 && !sunrise) sunrise=refine(m-2,m,prevAlt,alt);
+    if(prevAlt>0 && alt<=0 && !sunset)  sunset =refine(m-2,m,prevAlt,alt);
+    prevAlt=alt;
+  }
+  return {sunrise, sunset, alwaysUp: sunrise===null && sunset===null && prevAlt>0, alwaysDown: sunrise===null && sunset===null && prevAlt<=0};
+}
+
 // ---------- map ----------
 const map = L.map("map").setView([BUDAPEST.lat, BUDAPEST.lon], 16);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -250,16 +292,16 @@ const pinIcon = L.divIcon({className:"", html:'<div style="font-size:28px;line-h
 function setStart(lat,lon,label){
   if(startMarker) startMarker.remove();
   startMarker = L.marker([lat,lon],{icon:sunIcon,draggable:true}).addTo(map).bindTooltip("Start");
-  startMarker.on("dragend", ()=>maybeRoute());
+  startMarker.on("dragend", ()=>maybeRoute(true));
   if(label) document.getElementById("fromInput").value = label;
-  maybeRoute();
+  maybeRoute(true);
 }
 function setDest(lat,lon,label){
   if(destMarker) destMarker.remove();
   destMarker = L.marker([lat,lon],{icon:pinIcon,draggable:true}).addTo(map).bindTooltip("Destination");
-  destMarker.on("dragend", ()=>maybeRoute());
+  destMarker.on("dragend", ()=>maybeRoute(true));
   if(label) document.getElementById("toInput").value = label;
-  maybeRoute();
+  maybeRoute(true);
 }
 window._setStart = setStart; window._setDest = setDest;
 
@@ -319,17 +361,47 @@ function updateShadowTime(){       // route to whichever shadow engine is active
   if(smLayer){ if(shadowChk.checked) smLayer.setDate(chosenDate()); }
   else redrawShadows();
 }
-document.getElementById("nowBtn").onclick = ()=>{ setNow(); updateShadowTime(); maybeRoute(); };
+
+// ---------- sunrise/sunset: computed locally, drawn on the slider itself ----------
+const sliderTrack = document.getElementById("sliderTrack");
+const sliderMarks = document.getElementById("sliderMarks");
+const sunTimesLabel = document.getElementById("sunTimesLabel");
+function fmtHM(d){ return d ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : "—"; }
+function updateSunTimesDisplay(){
+  const c = map.getCenter();
+  const day = dateInput.value ? new Date(dateInput.value+"T12:00:00") : new Date();
+  const {sunrise, sunset, alwaysUp, alwaysDown} = sunTimes(day, c.lat, c.lng);
+
+  if(alwaysUp || alwaysDown){   // never actually happens at Budapest's latitude, but be safe
+    sunTimesLabel.textContent = alwaysUp ? "☀️ Sun never sets today" : "🌑 Sun never rises today";
+    sliderTrack.style.background = alwaysUp ? "linear-gradient(to right,#ffd94d,#f6a821)" : "#20263a";
+    sliderMarks.innerHTML = "";
+    return;
+  }
+  sunTimesLabel.textContent = `🌅 Sunrise ${fmtHM(sunrise)} · 🌇 Sunset ${fmtHM(sunset)}`;
+
+  const pct = (d)=> (d.getHours()*60+d.getMinutes())/1440*100;
+  const upPct = pct(sunrise), downPct = pct(sunset);
+  const night="#20263a", dayA="#ffd94d", dayB="#f6a821";
+  sliderTrack.style.background =
+    `linear-gradient(to right, ${night} 0%, ${night} ${upPct}%, ${dayA} ${upPct}%, ${dayB} ${downPct}%, ${night} ${downPct}%, ${night} 100%)`;
+  sliderMarks.innerHTML =
+    `<span class="mark" style="left:${upPct}%">🌅</span><span class="mark" style="left:${downPct}%">🌇</span>`;
+}
+
+document.getElementById("nowBtn").onclick = ()=>{ setNow(); updateShadowTime(); updateSunTimesDisplay(); maybeRoute(false); };
 let sliderT=null;
 timeSlider.addEventListener("input", ()=>{        // dragging: live shadow scrub
   updateTimeLabel();
   clearTimeout(sliderT); sliderT=setTimeout(updateShadowTime, 100);
 });
+// Time/date only re-colour the existing route for the new sun position — never re-fit the
+// map. Only a genuinely new route (new marker, mode switch) is allowed to move your view.
 timeSlider.addEventListener("change", ()=>{        // released: recompute route too
-  updateShadowTime(); maybeRoute();
+  updateShadowTime(); maybeRoute(false);
 });
-dateInput.addEventListener("change", ()=>{ updateShadowTime(); maybeRoute(); });
-document.querySelectorAll('input[name=mode]').forEach(r=>r.addEventListener("change", ()=>maybeRoute()));
+dateInput.addEventListener("change", ()=>{ updateShadowTime(); updateSunTimesDisplay(); maybeRoute(false); });
+document.querySelectorAll('input[name=mode]').forEach(r=>r.addEventListener("change", ()=>maybeRoute(true)));
 
 // ---------- geocoding (Nominatim) ----------
 function hookGeocoder(inputId, resultsId, isStart){
@@ -897,17 +969,17 @@ function bboxAround(a,b){
 // ---------- route orchestration ----------
 let routing=false;
 const goBtn=document.getElementById("goBtn");
-function maybeRoute(){
+function maybeRoute(fit){
   if(!startMarker||!destMarker) return;
-  route().catch(err=>{ setStatus("Route error: "+err.message, true); });
+  route(fit).catch(err=>{ setStatus("Route error: "+err.message, true); });
 }
 goBtn.onclick = ()=>{
   if(!startMarker||!destMarker){ setStatus("Set a start and a destination first — search above or tap the map.", true); return; }
   if(routing){ setStatus("Still working on it — free map servers can be slow at peak hours ☕", false); return; }
-  maybeRoute();
+  maybeRoute(true);
 };
 
-async function route(){
+async function route(fit){
   if(routing){ return; }
   routing=true;
   goBtn.disabled=true; goBtn.textContent="Working… ☀️";
@@ -935,7 +1007,7 @@ async function route(){
     if(!fastest){ setStatus("No walking connection found between these points — try moving a marker.", true); return; }
     const chosen=(mode==="fastest")?fastest:dijkstra(a,b,shadePen,sunPen);
 
-    drawRoutes(fastest, chosen, mode);
+    drawRoutes(fastest, chosen, mode, fit);
     showStats(fastest, chosen, mode, date);
     fetchClouds((s.lat+d.lat)/2,(s.lng+d.lng)/2,date);
     setStatus(world.sun.altitude<=0 ? "Night walk — the sun is down, every route is 100% shade. 🌙" : "");
@@ -946,7 +1018,7 @@ async function route(){
 }
 
 function routeLatLngs(r){ return r.nodes.map(i=>[world.lats[i],world.lons[i]]); }
-function drawRoutes(fastest, chosen, mode){
+function drawRoutes(fastest, chosen, mode, fit){
   routeLayer.clearLayers();
   if(mode!=="fastest"){
     L.polyline(routeLatLngs(fastest), {color:"#9a9a9a",weight:4,opacity:0.65,dashArray:"6 8"}).addTo(routeLayer);
@@ -957,7 +1029,10 @@ function drawRoutes(fastest, chosen, mode){
     L.polyline([[world.lats[n1],world.lons[n1]],[world.lats[n2],world.lons[n2]]],
       {color: e.shade<0.5?"#f6a821":"#5b6b8c", weight:6, opacity:0.92}).addTo(routeLayer);
   }
-  map.fitBounds(L.latLngBounds(routeLatLngs(chosen)),{padding:[40,40]});
+  // Only snap the view on an actual new-route request (Go, a new/moved marker, a mode
+  // switch) — not on every time/date nudge, which just re-colours the same path and
+  // shouldn't yank the map away from wherever the user is currently looking at shadows.
+  if(fit) map.fitBounds(L.latLngBounds(routeLatLngs(chosen)),{padding:[40,40]});
 }
 
 function fmtMin(m){ return m<60 ? Math.round(m)+" min" : Math.floor(m/60)+" h "+Math.round(m%60)+" min"; }
@@ -1091,7 +1166,7 @@ shadowChk.addEventListener("change", ()=>{
   if(shadowChk.checked) refreshShadowArea();
   else { shadowLayer.clearLayers(); setStatus(""); }
 });
-map.on("moveend", ()=>{ refreshShadowArea(); if(poisOn) loadPois(); });
+map.on("moveend", ()=>{ refreshShadowArea(); updateSunTimesDisplay(); if(poisOn) loadPois(); });
 
 async function refreshShadowArea(){
   if(smLayer) return;                // ShadeMap engine repaints itself on map moves
@@ -1295,6 +1370,7 @@ try{ indexedDB.deleteDatabase("sud-tiles-v1"); }catch(e){}        // pre-relatio
 try{ indexedDB.deleteDatabase("sud-tiles-v2"); }catch(e){}        // had broken multipolygon rings
 try{ indexedDB.deleteDatabase("sud-tiles-v3"); }catch(e){}        // pre-Copernicus-height tiles
 // height lookup must be in place before seed.json (or any live Overpass fetch) parses a building
+updateSunTimesDisplay();
 Promise.all([loadCopernicusHeights(), loadCanopy()]).then(loadSeed).then(()=>{
   if(initSdkLayer()){ if(shadowChk.checked) smLayer.addTo(map); }  // shademap.app engine
   else refreshShadowArea();                                        // built-in engine

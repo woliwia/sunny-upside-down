@@ -58,7 +58,7 @@ generalise this properly are very welcome.
 | ☀️ **Sun-aware routing** | Five modes: ⚡ Fastest · 🌤️ Sunnier · ☀️ 100 % sun · ⛅ Shadier · 🌑 100 % shade |
 | 📊 **Honest comparison** | Every route is scored against the plain shortest path: *"+24 pp sun (32 % more sun than the fastest route) · +3 min longer"* |
 | 🏙️ **Live shadow map** | Real building shadows drawn on the map — no destination needed, just pan around |
-| 🕐 **Time travel** | Drag the time slider and watch shadows sweep across the city; pick any date, past or future |
+| 🕐 **Time travel** | Drag the time slider and watch shadows sweep across the city; pick any date, past or future — the slider itself is shaded night/day with 🌅/🌇 markers so you can see sunrise and sunset at a glance |
 | 🌡️ **Hot-day mode** | The whole thing in reverse — maximum shade for summer afternoons |
 | 🍽️ **Places to walk to** | Toggle restaurants, cafés, bars and beer gardens, then tap one → "Walk here" |
 | 🎨 **Sun/shade route colouring** | The route line itself is gold in the sun, slate-blue in the shade |
@@ -75,7 +75,11 @@ taken. It cannot tell you where the shade will be at 17:30 tomorrow. So the app 
 
 1. **Sun position** — the sun's azimuth and elevation over Budapest are computed
    astronomically in the browser (SunCalc algorithm), accurate to a fraction of a degree,
-   for any minute of any date. No API involved.
+   for any minute of any date. No API involved. **Sunrise/sunset** for the selected day and
+   map location come from the same function — not a lookup or a fetch, just a scan across
+   the day for where elevation crosses 0°, refined by bisection — so the sunrise/sunset
+   markers on the time slider are guaranteed consistent with what the app treats as "day"
+   everywhere else.
 2. **City model** — walkable streets, building footprints with heights (`height`, or
    `building:levels` × 3 m, default 12 m), courtyard-block multipolygons and mapped street
    trees are downloaded from the Overpass API in ~500 m tiles as you pan, and cached in
