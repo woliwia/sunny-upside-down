@@ -97,11 +97,30 @@ taken. It cannot tell you where the shade will be at 17:30 tomorrow. So the app 
 | Data | Source | Licence |
 |---|---|---|
 | Map tiles | [OpenStreetMap](https://www.openstreetmap.org) | ODbL |
-| Streets, buildings, heights, trees, restaurants | [Overpass API](https://overpass-api.de) (4 mirrors, automatic failover) | ODbL |
+| Streets, buildings, trees, restaurants | [Overpass API](https://overpass-api.de) (4 mirrors, automatic failover) | ODbL |
+| Real building heights (where OSM has none) | [Copernicus Urban Atlas](https://land.copernicus.eu/en/products/urban-atlas/building-height-2012) via [Budapest Open Data Atlas](https://atlo.team/boda/) | free, open |
 | Address search | [Nominatim](https://nominatim.org) | ODbL |
 | Sun position | computed in-browser (SunCalc algorithm) | MIT |
 | Cloud forecast | [Open-Meteo](https://open-meteo.com) | free, keyless |
 | Terrain elevation *(optional engine)* | [AWS Open Data terrain tiles](https://registry.opendata.aws/terrain-tiles/) | public domain |
+
+## 📐 Shadow accuracy — real data behind the guesses
+
+Most Budapest buildings have no `height` tag in OpenStreetMap, so early versions of this app
+guessed a flat 12 m for all of them — visibly wrong on a boulevard of 6-storey blocks next to
+a 2-storey courtyard. Height accuracy is layered, most-trustworthy source first:
+
+1. **OSM tag** — `height`, or `building:levels` × 3 m, when someone has actually surveyed it.
+2. **Copernicus Urban Atlas** — the EU's own building-height survey (~3 m vertical accuracy,
+   derived from stereo satellite imagery), for ~122,000 Budapest buildings. Bundled as
+   `building_heights.json`, pre-joined to the *exact same* OSM building ids this app already
+   fetches — no guessing which polygon is which.
+3. **12 m flat guess** — only when neither of the above has data for that building.
+
+This shipped in `building_heights.json`; `seed.json`'s pre-packaged downtown extract was
+re-processed with the same priority so the very first load benefits too. See
+[Contributing](#-contributing) if you spot a building that's still visibly wrong — it likely
+means that one has no Copernicus coverage either.
 
 ## 🌓 Two shadow engines
 

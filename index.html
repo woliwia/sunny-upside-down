@@ -182,6 +182,10 @@
 
 // ---------- constants ----------
 const BUDAPEST = {lat:47.4977, lon:19.0546};   // Deák Ferenc tér — dense, instant wow
+// {osm_id: height_m}, real measured heights (Copernicus Urban Atlas, ~3m accuracy) for
+// ~122k Budapest buildings — overrides the flat 12m guess wherever OSM has no height tag.
+// Populated by loadCopernicusHeights() before any building is parsed.
+let copernicusHeights = {};
 const BUDAPEST_VIEWBOX = "18.90,47.63,19.36,47.32";
 const WALK_SPEED_MPS = 4.7 * 1000/3600;
 const CELL = 30;                    // spatial grid cell for ray casting, meters
@@ -391,7 +395,7 @@ const tileMem = new Map();   // key -> {ts, ways:[], buildings:[], trees:[]}
 let idbP=null;
 function idb(){
   if(!idbP) idbP = new Promise((res,rej)=>{
-    const r=indexedDB.open("sud-tiles-v3",1);   // v3: fixed multipolygon ring assembly
+    const r=indexedDB.open("sud-tiles-v4",1);   // v4: real Copernicus building heights
     r.onupgradeneeded=()=>r.result.createObjectStore("tiles");
     r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);
   });
@@ -469,11 +473,14 @@ function assembleRings(members){
   return rings;
 }
 
-function parseHeight(tags){
-  let h=12;
-  if(tags.height){ const v=parseFloat(tags.height); if(v>0) h=v; }
-  else if(tags["building:levels"]){ const v=parseFloat(tags["building:levels"]); if(v>0) h=v*3+2; }
-  return Math.min(h,150);
+// Height priority: 1) explicit OSM tag (authoritative, when someone measured/surveyed it)
+// 2) Copernicus Urban Atlas measured height for this exact OSM building (real, ~3m accuracy,
+//    from stereo satellite imagery — see building_heights.json) 3) flat guess, last resort.
+function parseHeight(tags, osmId){
+  if(tags.height){ const v=parseFloat(tags.height); if(v>0) return Math.min(v,150); }
+  if(tags["building:levels"]){ const v=parseFloat(tags["building:levels"]); if(v>0) return Math.min(v*3+2,150); }
+  if(osmId!=null){ const cop=copernicusHeights[osmId]; if(cop) return Math.min(cop,150); }
+  return 12;
 }
 
 // One fetch covers all missing tiles; results are sliced into tiles by bbox overlap.
@@ -536,12 +543,12 @@ out geom qt;`;
         s2=Math.min(s2,g.lat); w2=Math.min(w2,g.lon); n2=Math.max(n2,g.lat); e2=Math.max(e2,g.lon);
       }
       if(ll.length>=3 && plausibleBuilding(s2,w2,n2,e2))
-        addTo([s2,w2,n2,e2], {id:el.id, ll, h:parseHeight(el.tags), bb:[s2,w2,n2,e2]}, "buildings");
+        addTo([s2,w2,n2,e2], {id:el.id, ll, h:parseHeight(el.tags, el.id), bb:[s2,w2,n2,e2]}, "buildings");
     } else if(el.type==="relation" && el.tags && el.tags.building && el.members){
       // Multipolygon buildings (Budapest courtyard blocks). An outer ring is often SPLIT
       // across several member ways, so fragments must be chained end-to-end into closed
       // rings — closing each fragment on its own would produce district-sized wedges.
-      const h=parseHeight(el.tags);
+      const h=parseHeight(el.tags, el.id);
       let mi=0;
       for(const ring of assembleRings(el.members)){
         let s2=90,w2=180,n2=-90,e2=-180;
@@ -1077,6 +1084,15 @@ out center 250;`;
 function escapeHtml(s){ return s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
 // ---------- startup ----------
+// Real building heights: Copernicus Urban Atlas (EU stereo-satellite survey, ~3m vertical
+// accuracy), pre-joined to Budapest's exact OSM building ids by osm_id. See README §
+// "Shadow accuracy — real data behind the guesses" for where this comes from and why.
+async function loadCopernicusHeights(){
+  try{
+    const res = await fetch("building_heights.json");
+    if(res.ok) copernicusHeights = await res.json();
+  }catch(e){ /* falls back to OSM tags / flat guess */ }
+}
 // seed.json ships downtown Budapest with the app, so the very first open
 // paints shadows instantly even when the free OSM servers are busy.
 async function loadSeed(){
@@ -1101,7 +1117,9 @@ async function loadSeed(){
 try{ indexedDB.deleteDatabase("sunny-upside-down"); }catch(e){}   // v1 cache, superseded
 try{ indexedDB.deleteDatabase("sud-tiles-v1"); }catch(e){}        // pre-relations tiles
 try{ indexedDB.deleteDatabase("sud-tiles-v2"); }catch(e){}        // had broken multipolygon rings
-loadSeed().then(()=>{
+try{ indexedDB.deleteDatabase("sud-tiles-v3"); }catch(e){}        // pre-Copernicus-height tiles
+// height lookup must be in place before seed.json (or any live Overpass fetch) parses a building
+loadCopernicusHeights().then(loadSeed).then(()=>{
   if(initSdkLayer()){ if(shadowChk.checked) smLayer.addTo(map); }  // shademap.app engine
   else refreshShadowArea();                                        // built-in engine
 });
