@@ -99,6 +99,7 @@ taken. It cannot tell you where the shade will be at 17:30 tomorrow. So the app 
 | Map tiles | [OpenStreetMap](https://www.openstreetmap.org) | ODbL |
 | Streets, buildings, trees, restaurants | [Overpass API](https://overpass-api.de) (4 mirrors, automatic failover) | ODbL |
 | Real building heights (where OSM has none) | [Copernicus Urban Atlas](https://land.copernicus.eu/en/products/urban-atlas/building-height-2012) via [Budapest Open Data Atlas](https://atlo.team/boda/) | free, open |
+| Real vegetation / canopy height | [Meta &amp; WRI Global Canopy Height Map](https://registry.opendata.aws/dataforgood-fb-forests/) | free, open |
 | Address search | [Nominatim](https://nominatim.org) | ODbL |
 | Sun position | computed in-browser (SunCalc algorithm) | MIT |
 | Cloud forecast | [Open-Meteo](https://open-meteo.com) | free, keyless |
@@ -118,9 +119,19 @@ a 2-storey courtyard. Height accuracy is layered, most-trustworthy source first:
 3. **12 m flat guess** — only when neither of the above has data for that building.
 
 This shipped in `building_heights.json`; `seed.json`'s pre-packaged downtown extract was
-re-processed with the same priority so the very first load benefits too. See
-[Contributing](#-contributing) if you spot a building that's still visibly wrong — it likely
-means that one has no Copernicus coverage either.
+re-processed with the same priority so the very first load benefits too.
+
+**Vegetation** had the same problem from the other direction: OSM only has *individually
+mapped* trees, which is fine on a tree-lined boulevard someone has surveyed but leaves entire
+parks and forests (Margitsziget, the Buda hills) with zero shade. `canopy.png` fixes that —
+a real, satellite-measured canopy-height grid (Meta/WRI's Global Canopy Height Map, trained on
+aerial LiDAR) cropped to Budapest and packed one byte per ~19×28 m cell (0 = no canopy, 1–60 =
+metres). It feeds the exact same shadow ray-caster as buildings and OSM trees, so a walk
+through a park now shows real dappled shade instead of a blank, "fully sunny" park.
+
+See [Contributing](#-contributing) if you spot a building or a patch of green that's still
+visibly wrong — the most likely explanation is that specific spot has no coverage in either
+dataset yet.
 
 ## 🌓 Two shadow engines
 
@@ -231,10 +242,11 @@ Being honest about accuracy matters more than looking clever:
 
 - **Sidewalk sides.** OSM maps most streets as a single centre line, so on a wide boulevard the
   app cannot yet tell the sunny sidewalk from the shady one. This is the number-one item on the roadmap.
-- **Building heights.** Where OSM has no `height`/`building:levels` tag, 12 m (~4 floors) is
-  assumed. Central Pest is well tagged; outer districts less so.
-- **Trees.** Only trees somebody has actually mapped exist for the app, and tree coverage in
-  OSM is patchier than building coverage.
+- **Building heights.** OSM tag → real Copernicus measurement → 12 m flat guess, in that
+  order. The guess only kicks in for the minority of buildings neither source covers.
+- **Vegetation.** Individually-mapped OSM trees plus a real satellite canopy-height layer
+  (see above) — but the canopy map is from 2009–2020 imagery, so a tree planted last year, or
+  one felled last year, won't be reflected yet.
 - **Terrain.** The built-in engine treats the ground as flat — fine in Pest, less so around the
   Buda hills. Use the optional ShadeMap engine for terrain shadows.
 - **Clouds** are shown as information only; an overcast sky has no hard shadows anyway.

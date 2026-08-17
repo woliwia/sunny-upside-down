@@ -195,6 +195,19 @@ const MAX_CROW_KM = 7;
 const SHADOW_MIN_ZOOM = 16;
 const TILE_LAT = 0.0045, TILE_LON = 0.0068;    // ~500 m tiles
 const TILE_TTL = 45*86400000;                  // refresh tiles older than 45 days
+// canopy.png: real vegetation heights (Meta/WRI global canopy-height map, p95 per ~19x28m
+// cell) for the whole Budapest area — a byte-per-pixel grayscale grid, height in meters,
+// 0 = no canopy. Georeferencing is fixed at build time (see docs/build_canopy.py); pixel
+// (0,0) is this corner, row+ = south, col+ = east.
+const CANOPY_LAT0 = 47.65, CANOPY_LON0 = 18.85, CANOPY_RES = 1/4000;
+let canopyGrid = null, canopyW = 0, canopyH = 0;   // Uint8Array, filled by loadCanopy()
+function canopyAt(lat, lon){
+  if(!canopyGrid) return 0;
+  const row = Math.floor((CANOPY_LAT0 - lat) / CANOPY_RES);
+  const col = Math.floor((lon - CANOPY_LON0) / CANOPY_RES);
+  if(row<0 || row>=canopyH || col<0 || col>=canopyW) return 0;
+  return canopyGrid[row*canopyW + col];
+}
 const MODE_PENALTY = { fastest:[0,0], sunnyish:[2.5,0], sunmax:[40,0], shadyish:[0,2.5], shademax:[0,40] };
 const OVERPASS_MIRRORS = [
   {name:"overpass-api.de", url:"https://overpass-api.de/api/interpreter"},
@@ -644,7 +657,30 @@ function buildGraph(bb){
     const cx=Math.floor(x/CELL), cy=Math.floor(y/CELL);
     for(let i=-1;i<=1;i++) for(let j=-1;j<=1;j++) gridPush(world.treeGrid,cx+i,cy+j,{x,y,r:t.r,h:t.h});
   }
+  forEachCanopyCell(bb, (lat,lon,h)=>{
+    const [x,y]=toXY(lat,lon);
+    const r=CANOPY_RES*111320*0.55;   // half a cell's width, roughly circular coverage
+    const cx=Math.floor(x/CELL), cy=Math.floor(y/CELL);
+    for(let i=-1;i<=1;i++) for(let j=-1;j<=1;j++) gridPush(world.treeGrid,cx+i,cy+j,{x,y,r,h});
+  });
   world.graphBbox=bb;
+}
+
+// Iterate canopy pixels whose center falls in bbox=[s,w,n,e], calling cb(lat,lon,heightM).
+function forEachCanopyCell(bb, cb){
+  if(!canopyGrid) return;
+  const [s,w,n,e]=bb;
+  const row0=Math.max(0, Math.floor((CANOPY_LAT0-n)/CANOPY_RES));
+  const row1=Math.min(canopyH-1, Math.ceil((CANOPY_LAT0-s)/CANOPY_RES));
+  const col0=Math.max(0, Math.floor((w-CANOPY_LON0)/CANOPY_RES));
+  const col1=Math.min(canopyW-1, Math.ceil((e-CANOPY_LON0)/CANOPY_RES));
+  for(let row=row0; row<=row1; row++){
+    const base=row*canopyW;
+    for(let col=col0; col<=col1; col++){
+      const h=canopyGrid[base+col];
+      if(h>0) cb(CANOPY_LAT0-(row+0.5)*CANOPY_RES, CANOPY_LON0+(col+0.5)*CANOPY_RES, h);
+    }
+  }
 }
 
 // ---------- shadow ray engine ----------
@@ -918,11 +954,22 @@ function initSdkLayer(){
         try{ await ensureArea(vb, "Loading buildings"); }catch(e){}
         const {buildings}=collect(vb);
         setStatus("");
-        return buildings.map(bl=>({
+        const feats = buildings.map(bl=>({
           type:"Feature",
           properties:{height: bl.h},
           geometry:{type:"Polygon", coordinates:[bl.ll.map(([la,lo])=>[lo,la])]}
         }));
+        const half=CANOPY_RES/2;
+        forEachCanopyCell(vb, (lat,lon,h)=>{
+          feats.push({
+            type:"Feature",
+            properties:{height: h},
+            geometry:{type:"Polygon", coordinates:[[
+              [lon-half,lat-half],[lon+half,lat-half],[lon+half,lat+half],[lon-half,lat+half],[lon-half,lat-half]
+            ]]}
+          });
+        });
+        return feats;
       }
     });
     return true;
@@ -1036,6 +1083,18 @@ function redrawShadows(){
     }
     pushRing(ring);
   }
+  const canopyR = CANOPY_RES*111320*0.55;
+  forEachCanopyCell(vb, (lat,lon,h)=>{
+    const Ls=0.75*h/sun.tanAlt;
+    const cLat=lat+(-sun.diry*Ls)/110540;
+    const cLon=lon+(-sun.dirx*Ls)/(111320*cosL);
+    const ring=[];
+    for(let a=0;a<8;a++){
+      const ang=a/8*2*Math.PI;
+      ring.push([cLat + canopyR*Math.cos(ang)/110540, cLon + canopyR*Math.sin(ang)/(111320*cosL)]);
+    }
+    pushRing(ring);
+  });
   if(rings.length){
     L.polygon(rings,{stroke:false,fillColor:"#3b4256",fillOpacity:0.30,fillRule:"nonzero",interactive:false,renderer:shadowRenderer}).addTo(shadowLayer);
   }
@@ -1093,6 +1152,25 @@ async function loadCopernicusHeights(){
     if(res.ok) copernicusHeights = await res.json();
   }catch(e){ /* falls back to OSM tags / flat guess */ }
 }
+// Real vegetation: Meta/WRI global canopy-height map (aerial-LiDAR-trained, satellite-applied,
+// free/public), pre-cropped to Budapest and PNG-packed. Decoded once via canvas, kept in memory
+// as a plain byte grid — see README § "Shadow accuracy — real data behind the guesses".
+async function loadCanopy(){
+  try{
+    const res = await fetch("canopy.png");
+    if(!res.ok) return;
+    const blob = await res.blob();
+    const bitmap = await createImageBitmap(blob);
+    const cnv = document.createElement("canvas");
+    cnv.width = bitmap.width; cnv.height = bitmap.height;
+    const ctx = cnv.getContext("2d");
+    ctx.drawImage(bitmap, 0, 0);
+    const px = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    const grid = new Uint8Array(bitmap.width * bitmap.height);
+    for(let i=0;i<grid.length;i++) grid[i] = px[i*4];   // grayscale: R=G=B, read R
+    canopyGrid = grid; canopyW = bitmap.width; canopyH = bitmap.height;
+  }catch(e){ /* canopy is a bonus layer — OSM point-trees still work without it */ }
+}
 // seed.json ships downtown Budapest with the app, so the very first open
 // paints shadows instantly even when the free OSM servers are busy.
 async function loadSeed(){
@@ -1119,7 +1197,7 @@ try{ indexedDB.deleteDatabase("sud-tiles-v1"); }catch(e){}        // pre-relatio
 try{ indexedDB.deleteDatabase("sud-tiles-v2"); }catch(e){}        // had broken multipolygon rings
 try{ indexedDB.deleteDatabase("sud-tiles-v3"); }catch(e){}        // pre-Copernicus-height tiles
 // height lookup must be in place before seed.json (or any live Overpass fetch) parses a building
-loadCopernicusHeights().then(loadSeed).then(()=>{
+Promise.all([loadCopernicusHeights(), loadCanopy()]).then(loadSeed).then(()=>{
   if(initSdkLayer()){ if(shadowChk.checked) smLayer.addTo(map); }  // shademap.app engine
   else refreshShadowArea();                                        // built-in engine
 });
